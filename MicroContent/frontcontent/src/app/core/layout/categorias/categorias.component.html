@@ -1,0 +1,11 @@
+
+<ul class="categoria-lista">
+  <li>
+    <a [routerLink]="['/']">Todas</a>
+  </li>
+  <li *ngFor="let categoria of categorias">
+    <a [routerLink]="['/categoria', categoria.toLowerCase()]">
+      {{ categoria }}
+    </a>
+  </li>
+</ul>

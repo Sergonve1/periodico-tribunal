@@ -1,0 +1,24 @@
+<div *ngIf="articulo" class="container">
+  <h1>{{ articulo.title }}</h1>
+  <p><strong>Resumen:</strong> {{ articulo.summary }}</p>
+  <p><strong>Autor:</strong> {{ articulo.author.name }}</p>
+  <p><strong>Fecha de creación:</strong> {{ articulo.creation | date }}</p>
+  <p><strong>Fecha de publicación:</strong> {{ articulo.publication | date }}</p>
+  <p><strong>Vistas:</strong> {{ articulo.views }}</p>
+  <p><strong>Categorías:</strong> {{ articulo.categoria.join(', ') }}</p>
+
+  <hr>
+
+  <h2>Contenido</h2>
+  <p style="white-space: pre-wrap;">{{ articulo.body }}</p>
+
+  <hr>
+
+  <h2>Imágenes</h2>
+  <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+    <div *ngFor="let img of articulo.multimedias">
+      <img [src]="img.url" [alt]="img.description" style="max-width: 300px; border-radius: 10px;">
+      <p>{{ img.description }}</p>
+    </div>
+  </div>
+</div>

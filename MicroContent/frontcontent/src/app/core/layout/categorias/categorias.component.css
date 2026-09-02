@@ -1,0 +1,23 @@
+.categoria-lista {
+	display: flex;
+	gap: 1rem; /* Espacio entre categorías */
+	padding: 0;
+	margin: 0;
+	list-style: none;
+}
+
+.categoria-lista li {
+	display: inline; /* Opcional, también funciona con flex */
+}
+
+.categoria-lista a {
+	padding: 4px 8px;
+	border-radius: 6px;
+	transition: background-color 0.2s;
+	color: black;
+	text-decoration: none;
+}
+
+.categoria-lista a:hover {
+	background-color: #eee;
+}

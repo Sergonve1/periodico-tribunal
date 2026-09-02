@@ -1,0 +1,25 @@
+<div class="portada-mosaico">
+  <article
+    class="noticia-mosaico"
+    *ngFor="let articulo of articulos; let i = index"
+    [ngClass]="{ grande: i === 0, mediana: i % 5 === 0 && i !== 0 }"
+  >
+    <a [routerLink]="['/articulo', articulo.id]" class="noticia-enlace">
+      <ng-container *ngIf="articulo.multimedias?.[0]?.url as imagen">
+        <img
+          [src]="imagen"
+          [alt]="articulo.multimedias?.[0]?.description || articulo.title"
+          class="noticia-img"
+        />
+      </ng-container>
+      <div class="contenido">
+        <h3 class="titulo" [title]="articulo.title">{{ articulo.title }}</h3>
+        <p class="resumen" *ngIf="i < 5">{{ articulo.summary }}</p>
+        <div class="meta" *ngIf="i < 5">
+          <span class="autor">{{ articulo.author?.name }}</span>
+          <span class="fecha">{{ articulo.publication | date: 'mediumDate' }}</span>
+        </div>
+      </div>
+    </a>
+  </article>
+</div>
