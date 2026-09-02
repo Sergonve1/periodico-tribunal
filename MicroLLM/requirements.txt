@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+aiokafka
+motor
+transformers
+torch
+fastapi
+uvicorn[standard]
+motor
+aiokafka
+requests
+sentence-transformers

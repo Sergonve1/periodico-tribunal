@@ -1,0 +1,17 @@
+<div class="chat-widget" [class.closed]="!isOpen">
+    <div class="chat-header" (click)="toggleChat()">
+      <span>💬 Asistente</span>
+      <button>&#x25B2;</button> <!-- flecha -->
+    </div>
+    <div class="chat-body" *ngIf="isOpen">
+      <div class="message" *ngFor="let msg of messages" [class.user]="msg.role === 'user'">
+        <strong *ngIf="msg.role === 'user'">Tú:</strong>
+        <strong *ngIf="msg.role === 'assistant'">IA:</strong>
+        <span>{{ msg.content }}</span>
+      </div>
+      <div class="chat-input">
+        <input [(ngModel)]="userInput" (keyup.enter)="sendMessage()" placeholder="Escribe tu pregunta...">
+        <button (click)="sendMessage()">Enviar</button>
+      </div>
+    </div>
+  </div>

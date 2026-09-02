@@ -1,0 +1,122 @@
+services:
+  mysql:
+    image: mysql:8
+    container_name: mysql
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: backoffice
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:6
+    container_name: mongodb
+    ports:
+      - "27018:27017"
+    environment:
+      MONGO_INITDB_DATABASE: Newspaper
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: redpanda
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://host.docker.internal:9092
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: redpanda-console
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: host.docker.internal:9092
+    depends_on:
+      - redpanda
+
+  backoffice:
+    build:
+      context: ./MicroBackOffice
+    container_name: backoffice
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/backoffice
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+    depends_on:
+      - mysql
+      - redpanda
+
+  microcontent:
+    build:
+      context: ./MicroContent
+    container_name: content
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/Newspaper
+    depends_on:
+      - mongodb
+      - redpanda
+
+  frontcontent:
+    build:
+      context: ./MicroContent/frontcontent
+      dockerfile: Dockerfile
+    ports:
+      - "4200:4200"
+    container_name: frontcontent
+    restart: unless-stopped
+    command: npm run start
+    volumes:
+      - ./MicroContent/frontcontent:/app
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+
+  micro-llm:
+    build:
+      context: ./MicroLLM
+    container_name: micro-llm
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      MONGO_URI: mongodb://mongodb:27017/Newspaper
+    depends_on:
+      - mongodb
+      - redpanda
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

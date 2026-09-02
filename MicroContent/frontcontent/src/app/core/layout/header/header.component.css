@@ -1,0 +1,83 @@
+.top-header_container {
+  background-color: #eee;
+  padding: 10px;
+  white-space: nowrap;
+  overflow-x: auto;
+  font-size: 14px;
+  text-align: center
+}
+.legal-notice{
+  text-align: center
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  background-color:  #EBEBEB;
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  padding: 15px;
+  height: 60px;
+}
+
+.topbar-left {
+  justify-self: start;
+}
+
+.topbar-center {
+  justify-self: center;
+}
+
+.topbar-right {
+  justify-self: end;
+}
+
+.topbar-center {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 30px;
+  filter: brightness(0);
+}
+
+.invert {
+  filter: invert(100%);
+}
+
+.youtube-icon {
+  height: 25px;
+  width: auto;
+}
+
+.top-header-main {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 50px;
+}
+.categories-bar {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  padding: 10px 20px;
+  border-bottom: 1px solid #ccc;
+  overflow-x: auto;
+  white-space: nowrap;
+  background-color: #ffffff;
+}
+
+.category-link {
+  text-decoration: none;
+  color: #000000;
+  font-family: 'tno-adobe-font', 'neue-haas-grotesk-display', sans-serif;
+  font-size: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  display: block;
+  cursor: pointer;
+  transition: 0.3s ease-out;
+}
+
+.category-link:hover {
+  text-decoration: underline;
+}
