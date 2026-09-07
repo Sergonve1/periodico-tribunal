@@ -1,4 +1,4 @@
-# periodico-tribunal
+# Periodico tribunal
 
 Plataforma de noticias basada en microservicios: gestión de contenidos (backoffice), publicación/consulta de artículos, un microservicio de IA (embeddings/RAG con LLM) y un frontend en Angular. La comunicación entre microservicios se hace mediante eventos con Kafka (Redpanda).
 
