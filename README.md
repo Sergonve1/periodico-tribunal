@@ -213,7 +213,7 @@ curl -X POST http://localhost:8081/api/v1/admin/articles/ \
 ```
 (`state` debe ser uno de los valores del enum `State`; revisa `MicroBackOffice/src/main/java/project/newspaper/domain/State.java` para los valores válidos.) La respuesta incluye una cabecera `Location` para consultar el estado del procesamiento asíncrono en `GET /api/v1/admin/articles/status/{id}`.
 
-### Vía B: carga masiva a partir del scraping (para poblar con muchos artículos de golpe)
+### Vía B: RECOMENDADA carga masiva a partir del scraping (para poblar con muchos artículos de golpe)
 
 Usa los JSON generados por `WebScrapping` (o los ya incluidos en `WebScrapping/Articulos.zip`), sin pasar por Kafka ni por las APIs:
 
