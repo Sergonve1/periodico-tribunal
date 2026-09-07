@@ -173,10 +173,7 @@ Hay dos bases de datos: **MySQL** (usada solo por `MicroBackOffice`, como almac�
 
 - Con Docker Compose: contenedor `mongodb`, base de datos `Newspaper`, puerto expuesto en el host `27018` (dentro de la red Docker se accede como `mongodb:27017`). No requiere usuario/contraseña (sin autenticación).
 - `MicroContent` se conecta usando `SPRING_DATA_MONGODB_URI` (ver `application.yml`); Spring Data crea la colección `article` automáticamente al guardar el primer documento. También existe `MicroContent/src/main/resources/mongodb-config.xml`, que parece un resto de una config alternativa (apunta a `localhost:27017`, sin usuario/contraseña) — no la usa Spring Boot directamente, así que puedes ignorarla salvo que algún componente la cargue explícitamente.
-- `MicroLLM` usa Motor (Mongo async) en `app/services/mongo.py`, pero **atención**: ahí mismo la URI está *hardcodeada* a `mongodb://mongodb:27017/Newspaper` y la colección `embeddings`, ignorando la variable de entorno `MONGO_URI` que define `docker-compose.yml`. Esto funciona tal cual dentro de Docker Compose (porque el host `mongodb` resuelve igual), pero si quieres ejecutar `MicroLLM` fuera de Docker (Opción B de la sección 2) tendrás que:
-  - cambiar `mongodb://mongodb:27017/Newspaper` por `mongodb://localhost:27018/Newspaper` en `app/services/mongo.py`, o
-  - añadir un `/etc/hosts` / entrada DNS local que resuelva `mongodb` a `localhost`, o
-  - modificar `mongo.py` para que lea `os.getenv("MONGO_URI")` (recomendado si vas a alternar mucho entre Docker y local).
+- `MicroLLM` usa Motor (Mongo async) en `app/services/mongo.py`, que se conecta a la colección `embeddings` leyendo la URI de la variable de entorno `MONGO_URI` (con `mongodb://localhost:27018/Newspaper` como valor por defecto si no está definida). Dentro de Docker Compose usa automáticamente `MONGO_URI=mongodb://mongodb:27017/Newspaper` (definida en `docker-compose.yml` para el servicio `micro-llm`); si ejecutas `MicroLLM` fuera de Docker (Opción B de la sección 2), el valor por defecto ya apunta al puerto publicado en el host (`localhost:27018`), así que no hace falta tocar nada.
 - No hace falta crear la base ni las colecciones a mano: MongoDB las crea automáticamente en el primer `insert`.
 
 ### Resumen de puertos/credenciales (Docker Compose)
