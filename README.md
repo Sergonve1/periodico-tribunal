@@ -1,206 +1,168 @@
-# Periodico — Plataforma de noticias con microservicios y RAG
+# periodico-tribunal
 
-Proyecto de periódico digital compuesto por tres microservicios (dos en Spring Boot/Java y uno en Python/FastAPI), un frontend en Angular, y una infraestructura de mensajería (Kafka/Redpanda) que los conecta de forma asíncrona. Incluye un asistente conversacional (chat) que responde preguntas sobre las noticias usando embeddings semánticos y un LLM local servido por Ollama (RAG).
+Plataforma de noticias basada en microservicios: gestión de contenidos (backoffice), publicación/consulta de artículos, un microservicio de IA (embeddings/RAG con LLM) y un frontend en Angular. La comunicación entre microservicios se hace mediante eventos con Kafka (Redpanda).
 
-## Índice
-
-- [Arquitectura](#arquitectura)
-- [Estructura de carpetas](#estructura-de-carpetas)
-- [Puertos](#puertos)
-- [Requisitos previos](#requisitos-previos)
-- [Puesta en marcha rápida (Docker Compose)](#puesta-en-marcha-rápida-docker-compose)
-- [Puesta en marcha en modo desarrollo (sin Docker)](#puesta-en-marcha-en-modo-desarrollo-sin-docker)
-- [Variables de entorno](#variables-de-entorno)
-- [Topics de Kafka](#topics-de-kafka)
-- [Endpoints principales](#endpoints-principales)
-- [Aviso de seguridad](#aviso-de-seguridad)
-
-## Arquitectura
+## 1. Contenido del proyecto
 
 ```
-                         ┌──────────────────┐
-                         │  frontcontent     │  Angular (SPA pública)
-                         │  puerto 4200      │
-                         └────────┬──────────┘
-                                  │ HTTP
-                                  ▼
-   ┌───────────────┐     ┌──────────────────┐      ┌──────────────────┐
-   │ MicroBackOffice│     │   MicroContent    │      │     MicroLLM      │
-   │  (admin, ABM)  │     │ (lectura pública, │      │  (RAG / embeddings │
-   │  puerto 8081   │     │  chat, memoria)   │      │   / Ollama)        │
-   │  MySQL         │     │  puerto 8083      │      │  puerto 8000       │
-   └───────┬────────┘     │  MongoDB          │      │  MongoDB           │
-           │              └────────┬──────────┘      └─────────┬──────────┘
-           │                       │                            │
-           └──────────► Redpanda / Kafka (9092) ◄────────────────┘
-                                  │
-                                  ▼
-                             Ollama (11434) — LLM local (llama3:8b)
+periodico-tribunal/
+├── MicroBackOffice/            # Microservicio Spring Boot (Java 21 + Gradle) - gestión de artículos y categorías
+│   ├── src/main/java/project/newspaper/
+│   │   ├── application/        # Casos de uso: ArticleApplicationService, CategoryApplicationService
+│   │   ├── domain/              # Entidades y eventos: Article/CategoryCreatedEvent, CreationStatus, State...
+│   │   └── infraestructure/
+│   │       ├── api/             # Controladores REST: ArticleController, CategoryController
+│   │       └── kafka/           # Productor y listeners de confirmación (Kafka)
+│   ├── src/main/resources/application.yml   # Config: puerto 8081, MySQL, Kafka
+│   └── Dockerfile
+│
+├── MicroContent/               # Microservicio Spring Boot (Java 21 + Gradle) - contenido público, IA y memoria conversacional
+│   ├── src/main/java/project/newspaper/
+│   │   ├── application/        # ArticleService, CategoryService
+│   │   ├── domain/              # Article, Category, MemoryDocument, eventos de indexado/embeddings
+│   │   └── infraestructure/
+│   │       ├── api/             # ArticleController, CategoryController, MemoryController, QuestionController
+│   │       └── kafka/           # Listeners de creación de artículos/categorías, eventos de indexado
+│   ├── src/main/resources/application.yml   # Config: puerto 8083, MongoDB, Kafka
+│   ├── frontcontent/            # Frontend Angular 19 (SPA del periódico)
+│   │   └── src/app/
+│   │       ├── core/layout/     # Layout general: header, footer, categorías, chat
+│   │       ├── feature/         # Portada, detalle de artículo
+│   │       └── views/           # Vistas adicionales
+│   └── Dockerfile
+│
+├── MicroLLM/                   # Microservicio Python (FastAPI) - embeddings, RAG y respuestas con LLM (Ollama)
+│   ├── app/
+│   │   ├── main.py              # Arranque de FastAPI, ciclo de vida Mongo/Kafka
+│   │   ├── config/kafka.py
+│   │   ├── kafka/                # Consumer de eventos y generación de prompts
+│   │   └── services/             # mongo.py, embedding.py, cargaMongo.py, cargamasiva.py
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── WebScrapping/                # Ver sección 3 - scraping de artículos de Financial Times (proceso independiente)
+│
+├── docker-compose.yml           # Orquesta todos los servicios (MySQL, MongoDB, Redpanda, backend, frontend, LLM, Ollama)
+├── build.gradle.kts / settings.gradle.kts   # Proyecto Gradle multi-módulo (raíz: "newspaper")
+├── gradlew / gradlew.bat        # Wrapper de Gradle
+└── requirements.txt             # Dependencias Python sueltas en la raíz (heredadas, ver nota en sección 2)
 ```
 
-Flujo típico de creación de un artículo:
-1. Un admin llama a `POST /api/v1/admin/articles/` en **MicroBackOffice**, que guarda el estado en MySQL y publica el evento `backoffice.article.created` en Kafka.
-2. **MicroContent** consume ese evento, guarda el artículo en MongoDB, y publica `content.article.created.confirmation` (vuelve a BackOffice) y `article.created.embedding` (para MicroLLM).
-3. **MicroLLM** consume `article.created.embedding`, calcula el embedding del texto con `sentence-transformers` y lo guarda en MongoDB.
-4. Cuando un usuario pregunta algo desde el chat (`POST /api/v1/questions` en MicroContent), se publica `user.question.asked`; MicroLLM busca los artículos más similares por embedding, genera un resumen y una respuesta con Ollama (modelo `llama3:8b`), y guarda el historial de la conversación en MongoDB (expuesto luego vía `GET /api/v1/memory` en MicroContent).
+### Arquitectura y flujo de datos
 
-## Estructura de carpetas
+- **MicroBackOffice** (puerto 8081, MySQL): backoffice donde se crean/gestionan artículos y categorías. Al crear un recurso, publica un evento en Kafka.
+- **MicroContent** (puerto 8083, MongoDB): consume esos eventos, persiste el contenido "publicado" y expone la API pública que consume el frontend. También expone endpoints de preguntas/memoria conversacional (`QuestionController`, `MemoryController`) que se apoyan en `MicroLLM`.
+- **MicroLLM** (puerto 8000, FastAPI): consume eventos de Kafka para generar embeddings de los artículos (`embedding.py`) y los guarda en Mongo; expone lógica de generación de prompts/RAG apoyándose en Ollama.
+- **frontcontent** (puerto 4200, Angular 19): SPA que muestra portada, detalle de artículo, categorías y un chat que habla con `MicroLLM`/`MicroContent`.
+- **Redpanda** (Kafka API en 9092, consola en 8080): bus de eventos entre los tres microservicios.
+- **Ollama** (puerto 11434): sirve el modelo LLM local usado por `MicroLLM`.
 
-| Carpeta | Descripción |
-|---|---|
-| [`MicroBackOffice/`](MicroBackOffice) | Microservicio Spring Boot (Java 21) de administración/back-office. Expone API REST para crear artículos y categorías, persiste en **MySQL** y publica eventos en Kafka. Escucha las confirmaciones de creación que le devuelve `MicroContent` para actualizar el estado de la operación. |
-| [`MicroContent/`](MicroContent) | Microservicio Spring Boot (Java 21) de contenido público. Persiste artículos/categorías en **MongoDB**, expone la API que consume el frontend (listado de artículos, categorías, detalle, preguntas del chat, memoria de conversación) y republica eventos hacia `MicroLLM`. |
-| [`MicroContent/frontcontent/`](MicroContent/frontcontent) | SPA en **Angular 19** — la web pública del periódico (portada, detalle de artículo, categorías, componente de chat). Consume la API de `MicroContent` (hardcodeada a `http://localhost:8083`). |
-| [`MicroLLM/`](MicroLLM) | Microservicio en **Python/FastAPI**. Consume eventos de Kafka, genera embeddings de los artículos (`sentence-transformers`), resuelve preguntas del chat mediante búsqueda semántica + resumen/generación con **Ollama** (RAG), y guarda embeddings/memoria en MongoDB. |
-| `gradle/`, `gradlew*`, `settings.gradle.kts` | Build multi-módulo Gradle en la raíz que agrupa `MicroBackOffice` y `MicroContent` (proyecto raíz `newspaper`). `MicroLLM` no forma parte del build Gradle (es Python independiente). |
-| [`docker-compose.yml`](docker-compose.yml) | Orquesta **todos** los servicios e infraestructura (MySQL, MongoDB, Redpanda, Redpanda Console, los 3 microservicios, el frontend y Ollama). Es la forma recomendada de levantar el proyecto completo. |
-| `.venv/` | Entorno virtual de Python local (no debería estar versionado; ver aviso más abajo). No es necesario para ejecutar el proyecto vía Docker. |
+## 2. Comandos necesarios para probar el proyecto
 
-## Puertos
+### Opción A: todo con Docker Compose (recomendado)
 
-| Servicio | Puerto host | Descripción |
-|---|---|---|
-| `frontcontent` (Angular) | **4200** | Web pública |
-| `backoffice` (MicroBackOffice) | **8081** | API admin (Spring Boot) |
-| `microcontent` (MicroContent) | **8083** | API pública / chat (Spring Boot) |
-| `micro-llm` (MicroLLM) | **8000** | API FastAPI (health-check; la lógica RAG corre por Kafka) |
-| `ollama` | **11434** | Servidor LLM local (modelo `llama3:8b`) |
-| `mysql` | **3307** → 3306 interno | Base de datos de `MicroBackOffice` |
-| `mongodb` | **27018** → 27017 interno | Base de datos `Newspaper` (`MicroContent` y `MicroLLM`) |
-| `redpanda` (Kafka) | **9092** (broker), **9644** (admin) | Bus de eventos entre microservicios |
-| `redpanda-console` | **8080** | UI web para inspeccionar topics/mensajes de Kafka |
-
-## Requisitos previos
-
-- **Docker** y **Docker Compose** (forma recomendada, no requiere instalar nada más).
-- Alternativa para desarrollo local sin Docker:
-  - **JDK 21** (para `MicroBackOffice` y `MicroContent`, usan Gradle wrapper incluido).
-  - **Node.js 20** (para `frontcontent`, Angular CLI 19).
-  - **Python 3.11** (para `MicroLLM`).
-  - **Ollama** instalado localmente con el modelo `llama3:8b` descargado (`ollama pull llama3:8b`).
-  - Instancias locales de **MySQL 8** y **MongoDB 6**, y un broker Kafka (p. ej. el propio `redpanda` vía Docker).
-
-## Puesta en marcha rápida (Docker Compose)
-
-Desde la raíz del repositorio:
+Requiere Docker y Docker Compose instalados. Levanta MySQL, MongoDB, Redpanda (+ consola), Ollama y los 4 servicios de la aplicación:
 
 ```bash
 docker compose up --build
 ```
 
-Esto levanta, en orden de dependencias: `mysql`, `mongodb`, `redpanda`, `redpanda-console`, `backoffice`, `microcontent`, `frontcontent`, `micro-llm` y `ollama`.
+Servicios expuestos:
+| Servicio            | URL/Puerto                     |
+|---------------------|---------------------------------|
+| Frontend (Angular)  | http://localhost:4200           |
+| MicroBackOffice API | http://localhost:8081           |
+| MicroContent API    | http://localhost:8083           |
+| MicroLLM (FastAPI)  | http://localhost:8000/health    |
+| Redpanda Console    | http://localhost:8080           |
+| MySQL               | localhost:3307 (root/root)      |
+| MongoDB             | localhost:27018 (db `Newspaper`)|
+| Ollama               | http://localhost:11434         |
 
-Tras el arranque:
-
-1. **Descarga el modelo en Ollama** (la primera vez, el contenedor `ollama` arranca vacío):
-   ```bash
-   docker exec -it ollama ollama pull llama3:8b
-   ```
-2. Abre la web en [http://localhost:4200](http://localhost:4200).
-3. (Opcional) Inspecciona los topics de Kafka en [http://localhost:8080](http://localhost:8080) (Redpanda Console).
-4. Crea contenido usando la API de `MicroBackOffice` (no hay UI de administración, ver [Endpoints principales](#endpoints-principales)):
-   ```bash
-   curl -X POST http://localhost:8081/api/v1/admin/articles/category -H "Content-Type: application/json" -d "{\"name\":\"Tecnologia\"}"
-   ```
-
-Para bajar el entorno: `docker compose down` (añade `-v` si además quieres borrar los volúmenes de datos, incluido el modelo de Ollama descargado).
-
-## Puesta en marcha en modo desarrollo (sin Docker)
-
-Útil si vas a modificar el código de un microservicio concreto y prefieres ejecutarlo fuera de Docker mientras el resto sigue en contenedores.
-
-### 1. Infraestructura base (siempre vía Docker)
-
-Levanta solo la infraestructura y deja los microservicios que no vas a tocar:
-
+Para bajar el entorno:
 ```bash
-docker compose up mysql mongodb redpanda redpanda-console ollama
+docker compose down
 ```
 
-### 2. MicroBackOffice (Java/Spring Boot)
+> Nota: la primera vez que se usa `MicroLLM`/Ollama, hay que descargar el modelo dentro del contenedor de Ollama, p. ej.:
+> ```bash
+> docker exec -it ollama ollama pull <nombre-del-modelo>
+> ```
 
+### Opción B: ejecutar cada módulo por separado (desarrollo local)
+
+Se necesita tener arrancados manualmente MySQL, MongoDB y Redpanda (se pueden levantar solo esos servicios con `docker compose up mysql mongodb redpanda redpanda-console ollama`).
+
+**MicroBackOffice** (Java 21 + Gradle):
 ```bash
 cd MicroBackOffice
 ./gradlew bootRun
 ```
-Requiere `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` y `SPRING_KAFKA_BOOTSTRAP_SERVERS` en el entorno (o usa los valores por defecto de [`application.yml`](MicroBackOffice/src/main/resources/application.yml), que apuntan a `localhost:3306` y necesitan que expongas Kafka en `localhost:9092`, no `redpanda:9092`). Arranca en el puerto **8081**.
 
-### 3. MicroContent (Java/Spring Boot)
-
+**MicroContent** (Java 21 + Gradle):
 ```bash
 cd MicroContent
 ./gradlew bootRun
 ```
-Requiere `SPRING_DATA_MONGODB_URI` y `SPRING_KAFKA_BOOTSTRAP_SERVERS` (no tienen valor por defecto en [`application.yml`](MicroContent/src/main/resources/application.yml), hay que exportarlos, p. ej. `mongodb://localhost:27018/Newspaper` y `localhost:9092`). Arranca en el puerto **8083**.
 
-### 4. frontcontent (Angular)
-
+**Frontend Angular** (`MicroContent/frontcontent`, Node 20):
 ```bash
 cd MicroContent/frontcontent
 npm install
-npm start
+npm run start        # ng serve --host 0.0.0.0 --port 4200
 ```
-Arranca en el puerto **4200**. La URL de la API (`http://localhost:8083`) está hardcodeada en los componentes (`portada.component.ts`, `articulo-detalle.component.ts`, `chat-component.component.ts`, `categorias.service.ts`), no hace falta configurar nada adicional si `MicroContent` corre en el 8083.
+Otros comandos útiles del frontend: `npm run build`, `npm run watch`, `npm run test`.
 
-### 5. MicroLLM (Python/FastAPI)
-
+**MicroLLM** (Python 3.11):
 ```bash
 cd MicroLLM
-python -m venv .venv
-.venv\Scripts\activate      # Windows
+python -m venv venv
+venv\Scripts\activate        # en Windows (o `source venv/bin/activate` en Linux/Mac)
 pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-Variables de entorno relevantes: `KAFKA_BOOTSTRAP_SERVERS` (por defecto `redpanda:9092`, cámbialo a `localhost:9092` si corres fuera de Docker). La conexión a MongoDB está hardcodeada en [`app/services/mongo.py`](MicroLLM/app/services/mongo.py) a `mongodb://mongodb:27017/Newspaper` — para ejecutarlo fuera de Docker tendrás que editar ese valor (p. ej. a `mongodb://localhost:27018/Newspaper`).
+Comprobar que arrancó: `GET http://localhost:8000/health`.
 
-Además necesitas Ollama corriendo (local o en Docker) en `http://host.docker.internal:11434` (o cambiar la URL hardcodeada en [`app/kafka/consumer.py`](MicroLLM/app/kafka/consumer.py) si ejecutas todo en local sin Docker) con el modelo `llama3:8b` descargado.
+Antes de correr `MicroLLM` conviene descargar el tokenizador necesario:
+```bash
+python descargar_tokenizador.py
+```
 
-## Variables de entorno
+### Build de todo el proyecto Gradle (multi-módulo) desde la raíz
 
-Configuradas en [`docker-compose.yml`](docker-compose.yml) para el modo Docker; para ejecución local hay que fijarlas a mano en el entorno de cada proceso.
+```bash
+./gradlew build
+```
 
-| Servicio | Variable | Valor en Docker |
-|---|---|---|
-| backoffice | `SPRING_KAFKA_BOOTSTRAP_SERVERS` | `redpanda:9092` |
-| backoffice | `SPRING_DATASOURCE_URL` | `jdbc:mysql://mysql:3306/backoffice` |
-| backoffice | `SPRING_DATASOURCE_USERNAME` / `_PASSWORD` | `root` / `root` |
-| microcontent | `SPRING_KAFKA_BOOTSTRAP_SERVERS` | `redpanda:9092` |
-| microcontent | `SPRING_DATA_MONGODB_URI` | `mongodb://mongodb:27017/Newspaper` |
-| micro-llm | `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:9092` |
-| micro-llm | `MONGO_URI` | `mongodb://mongodb:27017/Newspaper` (definida en compose pero **no leída** por el código actual, que usa una URI hardcodeada) |
+Variables de entorno relevantes (ya configuradas por defecto en `docker-compose.yml`, o con valores por defecto en `application.yml` para ejecución local):
+- `SPRING_KAFKA_BOOTSTRAP_SERVERS`
+- `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` (MicroBackOffice)
+- `SPRING_DATA_MONGODB_URI` (MicroContent)
+- `KAFKA_BOOTSTRAP_SERVERS`, `MONGO_URI` (MicroLLM)
 
-## Topics de Kafka
+> El `requirements.txt` de la raíz del repositorio parece un resto de una copia/pega anterior (contiene `fastapi`, `uvicorn`, `aiokafka`, `motor`, `transformers`, `accelerate`); las dependencias reales y actualizadas del microservicio Python están en `MicroLLM/requirements.txt`.
 
-| Topic | Productor | Consumidor | Propósito |
-|---|---|---|---|
-| `backoffice.category.created` | MicroBackOffice | MicroContent | Nueva categoría creada |
-| `backoffice.article.created` | MicroBackOffice | MicroContent | Nuevo artículo creado |
-| `content.category.created.confirmation` | MicroContent | MicroBackOffice | Confirma que la categoría se guardó |
-| `content.article.created.confirmation` | MicroContent | MicroBackOffice | Confirma que el artículo se guardó |
-| `content.article.index` | MicroContent | *(sin consumidor implementado actualmente)* | Indexación del artículo |
-| `article.created.embedding` | MicroContent | MicroLLM | Dispara el cálculo de embedding del artículo |
-| `user.question.asked` | MicroContent | MicroLLM | Pregunta del usuario para el chat RAG |
+## 3. Carpeta WebScrapping
 
-## Endpoints principales
+Esta carpeta **no forma parte del sistema desplegado** (no aparece en `docker-compose.yml` ni se ejecuta como microservicio): es una herramienta auxiliar y manual para **generar datos de prueba** (artículos) con los que alimentar `MicroBackOffice`/`MicroContent`.
 
-**MicroBackOffice** (`http://localhost:8081`)
-- `POST /api/v1/admin/articles/` — crea un artículo (asíncrono vía Kafka).
-- `GET /api/v1/admin/articles/status/{id}` — estado de creación del artículo.
-- `POST /api/v1/admin/articles/category` — crea una categoría (asíncrono vía Kafka).
-- `GET /api/v1/admin/articles/category/status/{id}` — estado de creación de la categoría.
+Contenido:
+- **`WebScrapping.ipynb`**: notebook de Jupyter con el scraper, escrito con Selenium (controla Chrome) para extraer artículos del Financial Times. El flujo tiene dos fases:
+  1. **Búsqueda**: recorre las páginas de resultados de `ft.com/search?q=<empresa>` y guarda en un `.txt` los títulos y URLs de los artículos encontrados (`scrape_ft`).
+  2. **Extracción**: visita cada URL del `.txt` generado, extrae título, resumen, cuerpo, imágenes y fecha de publicación de cada artículo, y genera **un JSON por artículo** en una carpeta con el nombre de la empresa (`scrape_articles` / `extract_article_data`). Los artículos generados usan autores, categorías y secciones simulados (definidos en el propio notebook) para poder importarlos directamente al modelo de datos del periódico.
+  - Incluye utilidades para evitar bloqueos básicos del sitio: generación aleatoria de *User-Agents* (`generate_user_agents`), simulación de interacción humana con el ratón/scroll (`simulate_human_behavior`) y aceptación automática del aviso de cookies (`accept_cookies`).
+- **`Articulos.zip`**: artículos ya generados por el notebook en ejecuciones previas (JSONs listos para importar).
+- **`webscrapping/`**: entorno virtual de Python (`venv`) con las dependencias del scraper (Selenium, etc.) ya instaladas — **no debería estar versionado** en git ni forma parte del código fuente; es material generado localmente al crear el entorno (equivalente a un `node_modules`).
+- **`.idea/`**: configuración del IDE (PyCharm), sin relevancia funcional.
 
-**MicroContent** (`http://localhost:8083`)
-- `GET /articulos` — todos los artículos.
-- `GET /articulos/ultimos` — últimos 30 artículos.
-- `GET /articulos/categoria/{categoria}` — artículos por categoría (máx. 30).
-- `GET /articulos/{id}` — detalle de artículo.
-- `GET /categorias` — nombres de todas las categorías.
-- `POST /api/v1/questions` — envía una pregunta al chat (asíncrono, la respuesta se genera vía Kafka/MicroLLM).
-- `GET /api/v1/memory` — historial de la conversación del chat.
+**Cómo usarlo** (no forma parte del arranque normal del proyecto):
+```bash
+cd WebScrapping
+python -m venv webscrapping
+webscrapping\Scripts\activate      # Windows
+pip install selenium
+jupyter notebook WebScrapping.ipynb
+```
+Requiere tener Chrome y el *chromedriver* correspondiente instalados, y (según el notebook) una extensión de Chrome cargada desde una ruta local (`EXTENSION_PATH`) para evitar bloqueos anti-bot. El scraper guarda las rutas de salida apuntando a `C:\repositorio\WebScrapping`, por lo que conviene revisar y ajustar esas rutas antes de ejecutarlo en otra máquina.
 
-**MicroLLM** (`http://localhost:8000`)
-- `GET /health` — health check. Toda la lógica de negocio (embeddings, RAG) se ejecuta de forma asíncrona por Kafka, no por HTTP.
-
-## Aviso de seguridad
-
-[`MicroLLM/descargar_tokenizador.py`](MicroLLM/descargar_tokenizador.py) contiene un token personal de Hugging Face hardcodeado y commiteado en el historial de git. Se recomienda **revocarlo** en [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) y sustituirlo por una variable de entorno (`os.environ["HF_TOKEN"]`) antes de continuar usando o compartiendo este repositorio.
+Los JSONs resultantes se pueden usar para poblar manualmente `MicroBackOffice`/`MicroContent` vía sus APIs REST y así probar el frontend con datos realistas sin depender del scraping en cada prueba.
