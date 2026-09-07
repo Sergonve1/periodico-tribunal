@@ -59,9 +59,21 @@ periodico-tribunal/
 
 ## 2. Comandos necesarios para probar el proyecto
 
+### Requisito previo: instalar Docker
+
+Todo el proyecto está pensado para ejecutarse con **Docker** y **Docker Compose**. Antes de nada:
+
+- Instala [Docker Desktop](https://www.docker.com/products/docker-desktop/) (incluye Docker Engine + Docker Compose) en Windows/Mac, o Docker Engine + el plugin `docker compose` en Linux.
+- Verifica la instalación con:
+  ```bash
+  docker --version
+  docker compose version
+  ```
+- Asegúrate de que Docker Desktop está iniciado (el daemon corriendo) antes de lanzar cualquier comando `docker compose ...`.
+
 ### Opción A: todo con Docker Compose (recomendado)
 
-Requiere Docker y Docker Compose instalados. Levanta MySQL, MongoDB, Redpanda (+ consola), Ollama y los 4 servicios de la aplicación:
+Con Docker y Docker Compose ya instalados, levanta MySQL, MongoDB, Redpanda (+ consola), Ollama y los 4 servicios de la aplicación:
 
 ```bash
 docker compose up --build
@@ -176,64 +188,37 @@ Hay dos bases de datos: **MySQL** (usada solo por `MicroBackOffice`, como almac�
 
 ## 4. Cómo poblar la base de datos (artículos y embeddings)
 
-Al arrancar el proyecto desde cero, **MongoDB estará completamente vacía** (sin artículos ni embeddings) hasta que se inserte contenido por alguna de estas dos vías:
+Al arrancar el proyecto desde cero, **MongoDB estará completamente vacía** (sin artículos ni embeddings). La forma de poblarla con datos de prueba es la carga masiva a partir de los artículos obtenidos con `WebScrapping` (o los ya incluidos en `WebScrapping/Articulos.zip`), usando los scripts de `MicroLLM/app/services`. Esto inserta tanto los artículos "en crudo" (colección `article`) como sus embeddings (colección `embeddings`), ambos en la base de datos `Newspaper` de MongoDB.
 
-### Vía A: flujo normal de la aplicación (recomendado para probar el sistema end-to-end)
+Se asume que el proyecto se levanta con Docker Compose (`docker compose up --build`, ver sección 2) y que los scripts se ejecutan **dentro del contenedor `micro-llm`**, para no tener que montar un entorno Python en local ni preocuparte por resolver el hostname `mongodb`/`redpanda`.
 
-Es el camino real que sigue la app en producción, y encadena automáticamente artículo → indexado → embedding:
-
-```
-POST http://localhost:8081/api/v1/admin/articles/   (MicroBackOffice)
-   └─▶ evento Kafka "backoffice.article.created"
-         └─▶ MicroContent (ArticleCreatedListener):
-               - guarda el artículo en Mongo, colección "article" (BD Newspaper)
-               - publica "content.article.index"
-               - publica "article.created.embedding"
-                     └─▶ MicroLLM (consumer.py → process_article):
-                           - calcula el embedding del texto (título + cuerpo)
-                           - inserta el resultado en Mongo, colección "embeddings"
-```
-
-Para que la cadena completa funcione necesitas tener arriba a la vez: `mysql`, `mongodb`, `redpanda`, `backoffice`, `microcontent` y `micro-llm` (con Docker Compose, todos a la vez con `docker compose up --build`).
-
-Ejemplo de creación de un artículo de prueba:
-```bash
-curl -X POST http://localhost:8081/api/v1/admin/articles/ \
-  -H "Content-Type: application/json" \
-  -d '{
-        "title": "Título de prueba",
-        "slug": "titulo-de-prueba",
-        "author": "Redacción",
-        "state": "PUBLISHED",
-        "body": "Cuerpo del artículo...",
-        "summary": "Resumen breve",
-        "category": ["Tecnología"],
-        "multimedias": []
-      }'
-```
-(`state` debe ser uno de los valores del enum `State`; revisa `MicroBackOffice/src/main/java/project/newspaper/domain/State.java` para los valores válidos.) La respuesta incluye una cabecera `Location` para consultar el estado del procesamiento asíncrono en `GET /api/v1/admin/articles/status/{id}`.
-
-### Vía B: RECOMENDADA carga masiva a partir del scraping (para poblar con muchos artículos de golpe)
-
-Usa los JSON generados por `WebScrapping` (o los ya incluidos en `WebScrapping/Articulos.zip`), sin pasar por Kafka ni por las APIs:
-
-1. Descomprime `WebScrapping/Articulos.zip` (o genera artículos nuevos con el notebook, ver sección 5) en carpetas por empresa, p. ej. `C:\repositorio\WebScrapping\OpenAI\*.json`.
+1. Descomprime `WebScrapping/Articulos.zip` (o genera artículos nuevos con el notebook, ver sección 6) en carpetas por empresa, p. ej. `C:\repositorio\WebScrapping\OpenAI\*.json`.
 2. **Ajusta las rutas hardcodeadas** a tu máquina en:
    - `MicroLLM/app/services/cargaMongo.py` (constante `DIRECTORIO_RAIZ`, por defecto `C:\repositorio\WebScrapping`, y la lista `CARPETAS_OBJETIVO`)
    - `MicroLLM/app/services/cargamasiva.py` (rutas dentro de `procesar_articulos`)
-3. Inserta los artículos "en crudo" directamente en Mongo (colección `article`, BD `Newspaper`, por defecto contra `mongodb://localhost:27018/`, es decir el Mongo levantado con Docker Compose):
-   ```bash
-   cd MicroLLM
-   pip install -r requirements.txt pymongo
-   python -m app.services.cargaMongo
-   ```
-4. Genera los embeddings de esos mismos artículos con:
-   ```bash
-   python -m app.services.cargamasiva
-   ```
-   ⚠️ Tal como está, este script **no inserta los embeddings en Mongo**: los deja guardados como ficheros JSON en `C:\repositorio\WebScrapping\embeddings\<id>.json`. Si quieres que también queden disponibles para el chat (`MicroLLM`/`QuestionController`, que lee la colección `embeddings`), hay que adaptar el script para que, en vez de (o además de) escribir el JSON en disco, haga un `insert_one`/`insert_many` en la colección `embeddings` de Mongo (igual que hace `process_article` en `app/kafka/consumer.py`).
 
-En resumen: la Vía A es la más fiable porque reproduce el pipeline real (artículo + embedding quedan siempre sincronizados); la Vía B es más rápida para tener volumen de datos, pero tal como está el código hoy requiere el paso manual extra para que los embeddings lleguen a Mongo.
+   Como estos scripts se van a ejecutar **dentro** del contenedor `micro-llm` y no en tu máquina Windows, la ruta debe ser la ruta *dentro del contenedor*. Lo más sencillo es montar la carpeta `WebScrapping` como volumen del servicio `micro-llm` en `docker-compose.yml`, por ejemplo:
+   ```yaml
+   micro-llm:
+     ...
+     volumes:
+       - ./WebScrapping:/data/WebScrapping
+   ```
+   y entonces usar `DIRECTORIO_RAIZ = "/data/WebScrapping"` (Linux, dentro del contenedor) en ambos scripts en lugar de la ruta de Windows.
+
+3. Con los contenedores levantados (`docker compose up --build`), inserta los artículos "en crudo" en Mongo (colección `article`, BD `Newspaper`):
+   ```bash
+   docker compose exec micro-llm python -m app.services.cargaMongo
+   ```
+4. Genera los embeddings de esos mismos artículos e insértalos en Mongo (colección `embeddings`, BD `Newspaper`):
+   ```bash
+   docker compose exec micro-llm python -m app.services.cargamasiva
+   ```
+   `cargamasiva.py` ya está preparado para hacer el `insert`/`upsert` directamente en MongoDB (usa `pymongo` contra `Newspaper.embeddings`, leyendo la URI de la variable de entorno `MONGO_URI` si está definida, o `mongodb://localhost:27018/` por defecto). Dentro del contenedor `micro-llm`, `MONGO_URI` ya está definida por `docker-compose.yml` apuntando a `mongodb://mongodb:27017/Newspaper`, así que no hace falta configurar nada adicional.
+
+Tras estos dos pasos, tanto la colección `article` como `embeddings` de la base `Newspaper` quedan pobladas, y el chat (`QuestionController` → `MicroLLM`) ya puede buscar por similitud de embeddings sobre esos artículos.
+
+Tanto `cargaMongo.py` como `cargamasiva.py` leen la URI de conexión de la variable de entorno `MONGO_URI` (con `mongodb://localhost:27018/` como valor por defecto si no está definida). Al ejecutarlos con `docker compose exec micro-llm ...`, ya toman automáticamente el `MONGO_URI=mongodb://mongodb:27017/Newspaper` que define `docker-compose.yml` para ese servicio.
 
 ## 5. Carpeta WebScrapping
 
@@ -259,3 +244,99 @@ jupyter notebook WebScrapping.ipynb
 Requiere tener Chrome y el *chromedriver* correspondiente instalados, y (según el notebook) una extensión de Chrome cargada desde una ruta local (`EXTENSION_PATH`) para evitar bloqueos anti-bot. El scraper guarda las rutas de salida apuntando a `C:\repositorio\WebScrapping`, por lo que conviene revisar y ajustar esas rutas antes de ejecutarlo en otra máquina.
 
 Los JSONs resultantes se pueden usar para poblar manualmente `MicroBackOffice`/`MicroContent` vía sus APIs REST y así probar el frontend con datos realistas sin depender del scraping en cada prueba.
+
+## 6. Endpoints de la API
+
+Todos los ejemplos asumen los servicios levantados con `docker compose up --build` (sección 2) y usan `curl`; sustituye por Postman/Insomnia si lo prefieres.
+
+### MicroBackOffice (`http://localhost:8081`) — administración de artículos y categorías
+
+| Método | Endpoint | Descripción |
+|---|---|---|
+| `POST` | `/api/v1/admin/articles/` | Crea un artículo (asíncrono vía Kafka). Devuelve `202 Accepted` con cabecera `Location`. |
+| `GET` | `/api/v1/admin/articles/status/{id}` | Consulta el estado (`PENDING`/`OK`/...) de la creación de un artículo. |
+| `POST` | `/api/v1/admin/articles/category` | Crea una categoría (asíncrono vía Kafka). Devuelve `202 Accepted` con cabecera `Location`. |
+| `GET` | `/api/v1/admin/articles/category/status/{id}` | Consulta el estado de creación de una categoría. |
+
+Crear un artículo:
+```bash
+curl -X POST http://localhost:8081/api/v1/admin/articles/ \
+  -H "Content-Type: application/json" \
+  -d '{
+        "title": "Título de prueba",
+        "slug": "titulo-de-prueba",
+        "author": "Redacción",
+        "state": "PUBLISHED",
+        "body": "Cuerpo del artículo...",
+        "summary": "Resumen breve",
+        "category": ["Tecnología"],
+        "multimedias": []
+      }'
+```
+`state` debe ser uno de los valores del enum `State`: `DRAFT`, `REWIEW`, `PUBLISHED`, `ARCHIVED` (ver `MicroBackOffice/src/main/java/project/newspaper/domain/State.java`).
+
+Consultar el estado de creación (usando el `id` devuelto en la cabecera `Location`):
+```bash
+curl http://localhost:8081/api/v1/admin/articles/status/<id>
+```
+
+Crear una categoría:
+```bash
+curl -X POST http://localhost:8081/api/v1/admin/articles/category \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Tecnología"}'
+```
+
+Consultar el estado de creación de una categoría:
+```bash
+curl http://localhost:8081/api/v1/admin/articles/category/status/<id>
+```
+
+> Nota: crear artículos/categorías por esta vía requiere tener también `mongodb`, `redpanda` y `microcontent` levantados, ya que la escritura real en Mongo la hace `MicroContent` al consumir el evento de Kafka publicado por `MicroBackOffice`.
+
+### MicroContent (`http://localhost:8083`) — contenido público, memoria y preguntas
+
+| Método | Endpoint | Descripción |
+|---|---|---|
+| `GET` | `/articulos` | Lista todos los artículos. |
+| `GET` | `/articulos/ultimos` | Últimos 30 artículos, ordenados por fecha de creación descendente. |
+| `GET` | `/articulos/categoria/{categoria}` | Hasta 30 artículos de una categoría (case-insensitive), más recientes primero. |
+| `GET` | `/articulos/{id}` | Detalle de un artículo por id. `404` si no existe. |
+| `GET` | `/categorias` | Lista los nombres de todas las categorías. |
+| `POST` | `/api/v1/questions` | Envía una pregunta al chat (asíncrono vía Kafka; la responde `MicroLLM` usando RAG sobre los embeddings). |
+| `GET` | `/api/v1/memory` | Devuelve el historial de conversación guardado (`{"history": [...]}`). |
+
+Ejemplos:
+```bash
+curl http://localhost:8083/articulos
+curl http://localhost:8083/articulos/ultimos
+curl http://localhost:8083/articulos/categoria/Tecnolog%C3%ADa
+curl http://localhost:8083/articulos/<id>
+curl http://localhost:8083/categorias
+
+curl -X POST http://localhost:8083/api/v1/questions \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Qué ha anunciado OpenAI recientemente?"}'
+
+curl http://localhost:8083/api/v1/memory
+```
+`POST /api/v1/questions` solo encola la pregunta (responde `202 Accepted`); la respuesta generada por el LLM y el resumen de artículos relevantes se procesan de forma asíncrona en `MicroLLM` (ver `app/kafka/consumer.py`) y se guardan en la colección `memory` de Mongo, consultable después con `GET /api/v1/memory`. Para que esto funcione hacen falta `mongodb`, `redpanda`, `micro-llm` y `ollama` levantados y con la base poblada con embeddings (sección 4).
+
+### MicroLLM (`http://localhost:8000`)
+
+| Método | Endpoint | Descripción |
+|---|---|---|
+| `GET` | `/health` | Comprobación de estado del servicio (`{"status": "OK"}`). |
+
+```bash
+curl http://localhost:8000/health
+```
+`MicroLLM` no expone más endpoints HTTP: toda su lógica de negocio (calcular embeddings al crear un artículo, responder preguntas del chat) se dispara escuchando los topics de Kafka `article.created.embedding` y `user.question.asked`, no vía REST.
+
+### Frontend (`http://localhost:4200`)
+
+SPA en Angular; no es una API, se navega desde el navegador. Consume internamente los endpoints de `MicroContent` (portada, detalle de artículo, categorías y el chat).
+
+### Redpanda Console (`http://localhost:8080`)
+
+UI web para inspeccionar los topics de Kafka (`backoffice.article.created`, `content.article.index`, `content.article.created.confirmation`, `article.created.embedding`, `user.question.asked`, `backoffice.category.created`, etc.), sus mensajes y consumer groups — útil para depurar el flujo de eventos entre microservicios.

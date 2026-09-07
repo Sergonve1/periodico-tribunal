@@ -20,7 +20,7 @@ CARPETAS_OBJETIVO = [
 ]
 
 # Conexión a MongoDB
-client = MongoClient("mongodb://localhost:27018/")
+client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27018/"))
 db = client["Newspaper"]
 coleccion = db["article"]
 
