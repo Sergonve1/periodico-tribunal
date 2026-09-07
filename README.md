@@ -142,7 +142,100 @@ Variables de entorno relevantes (ya configuradas por defecto en `docker-compose.
 
 > El `requirements.txt` de la raíz del repositorio parece un resto de una copia/pega anterior (contiene `fastapi`, `uvicorn`, `aiokafka`, `motor`, `transformers`, `accelerate`); las dependencias reales y actualizadas del microservicio Python están en `MicroLLM/requirements.txt`.
 
-## 3. Carpeta WebScrapping
+## 3. Configuración de la base de datos
+
+Hay dos bases de datos: **MySQL** (usada solo por `MicroBackOffice`, como almacén interno del backoffice) y **MongoDB** (usada por `MicroContent` para el contenido publicado, y por `MicroLLM` para los embeddings y la memoria del chat).
+
+### MySQL (MicroBackOffice)
+
+- Con Docker Compose ya viene configurada: contenedor `mysql`, base de datos `backoffice`, usuario `root`, contraseña `root`, puerto expuesto en el host `3307` (dentro de la red Docker se accede como `mysql:3306`).
+- `MicroBackOffice` usa Hibernate con `ddl-auto: update` (`application.yml`), por lo que **las tablas se crean/actualizan solas** al arrancar la aplicación; no hace falta ejecutar ningún script SQL a mano.
+- Para desarrollo local (sin Docker) basta con tener un MySQL corriendo y pasar las variables de entorno, o levantar solo la base con:
+  ```bash
+  docker compose up mysql
+  ```
+  y luego arrancar `MicroBackOffice` con `./gradlew bootRun` (usará por defecto `jdbc:mysql://localhost:3306/backoffice`, root/root, según los valores por defecto de `application.yml`; si usas el contenedor de Compose, recuerda que el puerto publicado en el host es `3307`, así que tendrías que sobreescribir `SPRING_DATASOURCE_URL=jdbc:mysql://localhost:3307/backoffice`).
+- Si usas un MySQL propio, solo necesitas crear la base de datos vacía (`CREATE DATABASE backoffice;`); el esquema lo genera Hibernate.
+
+### MongoDB (MicroContent + MicroLLM)
+
+- Con Docker Compose: contenedor `mongodb`, base de datos `Newspaper`, puerto expuesto en el host `27018` (dentro de la red Docker se accede como `mongodb:27017`). No requiere usuario/contraseña (sin autenticación).
+- `MicroContent` se conecta usando `SPRING_DATA_MONGODB_URI` (ver `application.yml`); Spring Data crea la colección `article` automáticamente al guardar el primer documento. También existe `MicroContent/src/main/resources/mongodb-config.xml`, que parece un resto de una config alternativa (apunta a `localhost:27017`, sin usuario/contraseña) — no la usa Spring Boot directamente, así que puedes ignorarla salvo que algún componente la cargue explícitamente.
+- `MicroLLM` usa Motor (Mongo async) en `app/services/mongo.py`, pero **atención**: ahí mismo la URI está *hardcodeada* a `mongodb://mongodb:27017/Newspaper` y la colección `embeddings`, ignorando la variable de entorno `MONGO_URI` que define `docker-compose.yml`. Esto funciona tal cual dentro de Docker Compose (porque el host `mongodb` resuelve igual), pero si quieres ejecutar `MicroLLM` fuera de Docker (Opción B de la sección 2) tendrás que:
+  - cambiar `mongodb://mongodb:27017/Newspaper` por `mongodb://localhost:27018/Newspaper` en `app/services/mongo.py`, o
+  - añadir un `/etc/hosts` / entrada DNS local que resuelva `mongodb` a `localhost`, o
+  - modificar `mongo.py` para que lea `os.getenv("MONGO_URI")` (recomendado si vas a alternar mucho entre Docker y local).
+- No hace falta crear la base ni las colecciones a mano: MongoDB las crea automáticamente en el primer `insert`.
+
+### Resumen de puertos/credenciales (Docker Compose)
+
+| Base de datos | Host/puerto (desde tu máquina) | Host/puerto (dentro de la red Docker) | Usuario/contraseña |
+|---|---|---|---|
+| MySQL | `localhost:3307` | `mysql:3306` | `root` / `root` |
+| MongoDB | `localhost:27018` | `mongodb:27017` | sin autenticación |
+
+## 4. Cómo poblar la base de datos (artículos y embeddings)
+
+Al arrancar el proyecto desde cero, **MongoDB estará completamente vacía** (sin artículos ni embeddings) hasta que se inserte contenido por alguna de estas dos vías:
+
+### Vía A: flujo normal de la aplicación (recomendado para probar el sistema end-to-end)
+
+Es el camino real que sigue la app en producción, y encadena automáticamente artículo → indexado → embedding:
+
+```
+POST http://localhost:8081/api/v1/admin/articles/   (MicroBackOffice)
+   └─▶ evento Kafka "backoffice.article.created"
+         └─▶ MicroContent (ArticleCreatedListener):
+               - guarda el artículo en Mongo, colección "article" (BD Newspaper)
+               - publica "content.article.index"
+               - publica "article.created.embedding"
+                     └─▶ MicroLLM (consumer.py → process_article):
+                           - calcula el embedding del texto (título + cuerpo)
+                           - inserta el resultado en Mongo, colección "embeddings"
+```
+
+Para que la cadena completa funcione necesitas tener arriba a la vez: `mysql`, `mongodb`, `redpanda`, `backoffice`, `microcontent` y `micro-llm` (con Docker Compose, todos a la vez con `docker compose up --build`).
+
+Ejemplo de creación de un artículo de prueba:
+```bash
+curl -X POST http://localhost:8081/api/v1/admin/articles/ \
+  -H "Content-Type: application/json" \
+  -d '{
+        "title": "Título de prueba",
+        "slug": "titulo-de-prueba",
+        "author": "Redacción",
+        "state": "PUBLISHED",
+        "body": "Cuerpo del artículo...",
+        "summary": "Resumen breve",
+        "category": ["Tecnología"],
+        "multimedias": []
+      }'
+```
+(`state` debe ser uno de los valores del enum `State`; revisa `MicroBackOffice/src/main/java/project/newspaper/domain/State.java` para los valores válidos.) La respuesta incluye una cabecera `Location` para consultar el estado del procesamiento asíncrono en `GET /api/v1/admin/articles/status/{id}`.
+
+### Vía B: carga masiva a partir del scraping (para poblar con muchos artículos de golpe)
+
+Usa los JSON generados por `WebScrapping` (o los ya incluidos en `WebScrapping/Articulos.zip`), sin pasar por Kafka ni por las APIs:
+
+1. Descomprime `WebScrapping/Articulos.zip` (o genera artículos nuevos con el notebook, ver sección 5) en carpetas por empresa, p. ej. `C:\repositorio\WebScrapping\OpenAI\*.json`.
+2. **Ajusta las rutas hardcodeadas** a tu máquina en:
+   - `MicroLLM/app/services/cargaMongo.py` (constante `DIRECTORIO_RAIZ`, por defecto `C:\repositorio\WebScrapping`, y la lista `CARPETAS_OBJETIVO`)
+   - `MicroLLM/app/services/cargamasiva.py` (rutas dentro de `procesar_articulos`)
+3. Inserta los artículos "en crudo" directamente en Mongo (colección `article`, BD `Newspaper`, por defecto contra `mongodb://localhost:27018/`, es decir el Mongo levantado con Docker Compose):
+   ```bash
+   cd MicroLLM
+   pip install -r requirements.txt pymongo
+   python -m app.services.cargaMongo
+   ```
+4. Genera los embeddings de esos mismos artículos con:
+   ```bash
+   python -m app.services.cargamasiva
+   ```
+   ⚠️ Tal como está, este script **no inserta los embeddings en Mongo**: los deja guardados como ficheros JSON en `C:\repositorio\WebScrapping\embeddings\<id>.json`. Si quieres que también queden disponibles para el chat (`MicroLLM`/`QuestionController`, que lee la colección `embeddings`), hay que adaptar el script para que, en vez de (o además de) escribir el JSON en disco, haga un `insert_one`/`insert_many` en la colección `embeddings` de Mongo (igual que hace `process_article` en `app/kafka/consumer.py`).
+
+En resumen: la Vía A es la más fiable porque reproduce el pipeline real (artículo + embedding quedan siempre sincronizados); la Vía B es más rápida para tener volumen de datos, pero tal como está el código hoy requiere el paso manual extra para que los embeddings lleguen a Mongo.
+
+## 5. Carpeta WebScrapping
 
 Esta carpeta **no forma parte del sistema desplegado** (no aparece en `docker-compose.yml` ni se ejecuta como microservicio): es una herramienta auxiliar y manual para **generar datos de prueba** (artículos) con los que alimentar `MicroBackOffice`/`MicroContent`.
 
