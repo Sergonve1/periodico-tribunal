@@ -1,7 +1,8 @@
 import os
 import json
 from datetime import datetime
-from embedding import get_embedding  # Asegúrate de que embedding.py está junto a este script
+from pymongo import MongoClient
+from .embedding import get_embedding
 
 CARPETAS = [
     "Anthropic",
@@ -15,13 +16,14 @@ CARPETAS = [
     # Agrega más nombres si lo necesitas
 ]
 
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27018/")
+client = MongoClient(MONGO_URI)
+coleccion_embeddings = client["Newspaper"]["embeddings"]
+
 def procesar_articulos(nombre_carpeta: str):
     base_path = os.path.join("C:\\repositorio\\WebScrapping", nombre_carpeta)
-    output_path = os.path.join("C:\\repositorio\\WebScrapping", "embeddings")
-    os.makedirs(output_path, exist_ok=True)
 
     print(f"📂 Base path: {base_path}")
-    print(f"📂 Output path: {output_path}")
 
     if not os.path.exists(base_path):
         print(f"❌ Carpeta no encontrada: {base_path}")
@@ -63,11 +65,9 @@ def procesar_articulos(nombre_carpeta: str):
                 "timestamp": timestamp
             }
 
-            salida_json = os.path.join(output_path, f"{id_}.json")
-            with open(salida_json, "w", encoding="utf-8") as f:
-                json.dump(resultado, f, ensure_ascii=False, indent=2)
+            coleccion_embeddings.replace_one({"_id": id_}, resultado, upsert=True)
 
-            print(f"💾 Guardado en: {salida_json}")
+            print(f"💾 Embedding insertado en MongoDB (Newspaper.embeddings) con _id: {id_}")
 
         except Exception as e:
             print(f"❌ Error procesando {archivo} en {nombre_carpeta}: {e}")
