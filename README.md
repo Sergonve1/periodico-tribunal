@@ -337,3 +337,69 @@ SPA en Angular; no es una API, se navega desde el navegador. Consume internament
 ### Redpanda Console (`http://localhost:8080`)
 
 UI web para inspeccionar los topics de Kafka (`backoffice.article.created`, `content.article.index`, `content.article.created.confirmation`, `article.created.embedding`, `user.question.asked`, `backoffice.category.created`, etc.), sus mensajes y consumer groups — útil para depurar el flujo de eventos entre microservicios.
+
+## 7. Experimento
+
+Dentro de `MicroLLM/app/kafka/` hay, mezclados con el código de producción (`consumer.py`, `generate_prompt.py`), los scripts y datos de un **experimento offline** para el TFG: un barrido de **4 funciones de similitud × 6 valores de top-k** (24 condiciones) que evalúa la parte de recuperación (retrieval) y generación del pipeline RAG, comparando coseno, producto escalar, distancia euclídea y distancia Manhattan como función de scoring para elegir qué artículos/pasajes pasar como contexto al LLM. Es un proceso manual e independiente del arranque normal de la aplicación (no se ejecuta desde Docker Compose ni consume/produce eventos Kafka).
+
+Archivos involucrados (todos en `MicroLLM/app/kafka/`):
+
+| Archivo | Qué es |
+|---|---|
+| `eval_dataset.py` | Dataset "v1": 50 preguntas en inglés sobre artículos de la carpeta `Artificial intelligence`, cada una con `id`, `question`, `reference_answer` y `gold_article_id` (un único artículo relevante por pregunta). |
+| `experiment.py` | Experimento "v1": embebe cada artículo entero (`title + body`) del corpus, y para cada combinación (función, k) recupera el top-k, genera el contexto, llama al LLM real (Ollama) y calcula métricas. |
+| `corpus_embeddings_cache.json` ⚠️ *(no está en el repo)* | Caché en disco de los embeddings del corpus v1 (uno por artículo), generada automáticamente la primera vez que se ejecuta `experiment.py`, para no recalcular los embeddings en cada relanzamiento. |
+| `resultados_experimento_raw.csv` | Resultados "en bruto" del experimento v1: una fila por (pregunta, función, k), con `precision_at_k`, `recall_at_k`, `reciprocal_rank`, `generation_similarity`, artículos recuperados y respuesta generada por el LLM. |
+| `resultados_experimento.csv` | Resumen agregado del experimento v1 por condición (media ± desviación típica de Precision@k, Recall@k, MRR y similitud de la respuesta generada frente a la de referencia), en el formato usado en la memoria del TFG. |
+| `eval_dataset_v2.py` | Dataset "v2" (versión "difícil"): 40 preguntas parafraseadas (no copian el vocabulario del artículo) sobre un corpus ampliado a 8 carpetas (`Anthropic`, `Artificial intelligence`, `ia`, `Meta`, `Microsoft`, `NVIDIA`, `OpenAI`, `Tesla`); la mitad son *single-hop* (`gold_ids` con 1 artículo) y la otra mitad *multi-hop* (`gold_ids` con 2-3 artículos, sacadas de clústers temáticos con artículos distractores muy parecidos). |
+| `experiment_v2.py` | Experimento "v2": trocea cada artículo en pasajes a nivel de párrafo (en vez de embeber el artículo entero) para aumentar la variabilidad de norma de los embeddings —lo que permite que las 4 funciones de similitud discrepen en el ranking—, y generaliza las métricas de recuperación a `\|Rel(q)\| ≥ 1` (relevancia definida a nivel de artículo, recuperación a nivel de pasaje). |
+| `corpus_v2_embeddings_cache.json` ⚠️ *(no está en el repo)* | Caché en disco de los embeddings de los pasajes del corpus v2 (más de 10.000 pasajes, de ahí que este fichero pese mucho más que el de v1). |
+| `resultados_experimento_v2_raw.csv` / `resultados_experimento_v2.csv` | Equivalentes a los de v1 (en bruto / resumen agregado), pero para el experimento v2, incluyendo además `hop_type` y `n_gold` por pregunta. |
+
+### Cómo se generaron los datos (`eval_dataset.py` / `eval_dataset_v2.py`)
+
+Las preguntas y sus `reference_answer` **no se generan en código**: son un conjunto de evaluación (*gold set*) redactado a mano por el autor del TFG a partir de artículos reales obtenidos con el scraper de la carpeta `WebScrapping` (sección 5), citando explícitamente el `id`/`_id` del JSON del artículo del que sale cada respuesta (`gold_article_id` en v1, `gold_ids` en v2). Es decir, ambos ficheros son literalmente el dataset de evaluación, no un script que "genere" datos al ejecutarse (`eval_dataset_v2.py` solo tiene, al final, unas aserciones que validan que no haya ids duplicados y que el número de `gold_ids` cuadre con `hop_type`).
+
+Por tanto, para poder ejecutar el experimento hace falta tener en disco, en carpetas por empresa/tema, los mismos JSON de artículos que se usaron para escribir esas preguntas — los generados por el notebook de `WebScrapping` (o el contenido de `WebScrapping/Articulos.zip`).
+
+> ⚠️ **Las cachés de embeddings (`corpus_embeddings_cache.json` y `corpus_v2_embeddings_cache.json`) se han eliminado del repositorio.** El fichero v2 en particular pesaba más de 120 MB (por los >10.000 pasajes del corpus troceado), lo que hacía muy difícil subirlo a GitHub (límites de tamaño de archivo/repositorio, además de no tener mucho sentido versionar un artefacto binario regenerable). **Hay que volver a generarlas** antes de poder ejecutar el experimento: simplemente lanzando `experiment.py` / `experiment_v2.py` sin que exista el fichero de caché correspondiente, el script detecta que no existe, calcula los embeddings de todo el corpus con `sentence-transformers` (puede tardar bastante, sobre todo en v2 por el número de pasajes) y los guarda de nuevo en disco en esa misma ruta — no hace falta ningún paso manual adicional, solo tener el corpus JSON disponible (ver más abajo) la primera vez que se ejecute cada script.
+
+### Qué se necesita para replicar el experimento
+
+- **Python 3.11** con las dependencias de `MicroLLM/requirements.txt` (en particular `sentence-transformers`, `torch`, `numpy` y `requests`); no hace falta MongoDB ni Kafka, el corpus se lee directamente de los JSON en disco.
+- **Ollama** corriendo y accesible, con el modelo `llama3:8b` descargado (puede ser el contenedor `ollama` de `docker-compose.yml`, o una instalación local):
+  ```bash
+  docker compose up ollama
+  docker exec -it ollama ollama pull llama3:8b
+  ```
+- Los **JSON de artículos** del scraping, organizados en carpetas por empresa/tema:
+  - Para `experiment.py` (v1): una carpeta `Artificial intelligence` con los artículos.
+  - Para `experiment_v2.py` (v2): una carpeta raíz que contenga las 8 subcarpetas `Anthropic`, `Artificial intelligence`, `ia`, `Meta`, `Microsoft`, `NVIDIA`, `OpenAI`, `Tesla`.
+  - Ambos scripts tienen la ruta por defecto **hardcodeada a `C:\repositorio\...`** (ruta de la máquina donde se hizo el TFG); hay que sobreescribirla con las variables de entorno `CORPUS_DIR` (v1) / `CORPUS_ROOT` (v2), o con los argumentos `--corpus-dir` / `--corpus-root`, apuntando a donde hayas descomprimido `WebScrapping/Articulos.zip`.
+- Los ficheros `corpus_embeddings_cache.json` / `corpus_v2_embeddings_cache.json` ya incluidos sirven como caché: si el corpus en disco coincide exactamente con los ids ya cacheados, el script reutiliza esos embeddings y no vuelve a calcularlos (ni necesita descargar el modelo de `sentence-transformers`). Si el corpus no coincide (por ejemplo, usas un subconjunto distinto de artículos), el script recalcula y sobreescribe la caché.
+
+### Cómo se ejecutan los comandos
+
+Desde la carpeta `MicroLLM`, con el entorno Python activado (`pip install -r requirements.txt`):
+
+```bash
+cd MicroLLM
+
+# Experimento v1 (corpus = artículos enteros, carpeta "Artificial intelligence")
+set CORPUS_DIR=C:\ruta\a\WebScrapping\Artificial intelligence      # Windows (PowerShell: $env:CORPUS_DIR=...)
+python -m app.kafka.experiment --test                              # prueba rápida (3 preguntas, 2 condiciones)
+python -m app.kafka.experiment                                     # barrido completo (50 preguntas x 24 condiciones)
+
+# Experimento v2 (corpus = pasajes por párrafo, 8 carpetas temáticas)
+set CORPUS_ROOT=C:\ruta\a\WebScrapping                              # carpeta que contiene las 8 subcarpetas
+python -m app.kafka.experiment_v2 --test                           # prueba rápida
+python -m app.kafka.experiment_v2                                  # barrido completo (40 preguntas x 24 condiciones)
+```
+
+Parámetros opcionales (ambos scripts):
+- `--ollama-url` (por defecto `http://localhost:11434/api/generate`, o la variable de entorno `OLLAMA_URL`)
+- Variable de entorno `OLLAMA_MODEL` (por defecto `llama3:8b`)
+
+Ambos scripts son **reanudables**: si se interrumpe la ejecución, al volver a lanzarlos se saltan las combinaciones (pregunta, función, k) que ya estén en el CSV de resultados en bruto (`resultados_experimento_raw.csv` / `resultados_experimento_v2_raw.csv`), y al terminar regeneran el CSV resumen (`resultados_experimento.csv` / `resultados_experimento_v2.csv`) con la media ± desviación típica de Precision@k, Recall@k, MRR y similitud de la respuesta generada, por cada combinación (función, k) — el mismo formato de tabla usado en la memoria del TFG.
+
+> Nota: un barrido completo hace 24 condiciones × (50 o 40) preguntas = hasta 1200 llamadas reales al LLM vía Ollama, por lo que puede tardar bastante (de minutos a varias horas según el hardware). El modo `--test` sirve para comprobar que la configuración (corpus, Ollama) funciona antes de lanzar el barrido completo.
